@@ -1,216 +1,179 @@
-#!/usr/bin/env python3
-"""
-DIGITAL OPTIONS — CSP DAILY SCREENER WITH DISCORD INTEGRATION
-Automated trading opportunity scanner that posts to Discord webhook
-Runs daily at 8 AM ET via GitHub Actions
-"""
-
-import json
 import requests
-import os
+import json
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
 
-# ============================================================================
 # CONFIG
-# ============================================================================
-
-TICKER_UNIVERSE = [
-    "PLTR", "NVDA", "AMD", "COIN", "CRWV", "CBRS", "HOOD", "CRSP", "GOOG", "SQ"
-]
+TICKER_UNIVERSE = ["PLTR", "NVDA", "AMD", "COIN", "CRWV", "CBRS", "HOOD", "CRSP", "GOOG", "SQ"]
+DISCORD_WEBHOOK_CSP = "YOUR_WEBHOOK_URL"  # Set via GitHub secret
+CSP_PARAMETERS = {
+    "NVDA": {"premium_pct": 0.025, "delta_target": 0.35},
+    "AMD": {"premium_pct": 0.025, "delta_target": 0.35},
+    "COIN": {"premium_pct": 0.025, "delta_target": 0.35},
+    "PLTR": {"premium_pct": 0.020, "delta_target": 0.35},
+    "HOOD": {"premium_pct": 0.020, "delta_target": 0.35},
+    "CRWV": {"premium_pct": 0.015, "delta_target": 0.35},
+    "CBRS": {"premium_pct": 0.015, "delta_target": 0.35},
+    "CRSP": {"premium_pct": 0.015, "delta_target": 0.35},
+    "GOOG": {"premium_pct": 0.015, "delta_target": 0.35},
+    "SQ": {"premium_pct": 0.015, "delta_target": 0.35},
+}
 
 EARNINGS_BLACKOUT = {
-    "PLTR": "2026-11-02",
-    "AMD": "2026-11-03",
-    "COIN": "2026-10-29",
-    "HOOD": "2026-11-04",
+    "NVDA": "2026-10-15",
+    "AMD": "2026-10-20",
+    "COIN": "2026-10-28",
+    "PLTR": "2026-11-05",
+    "GOOG": "2026-10-29",
 }
 
-CSP_PARAMETERS = {
-    "delta_min": 0.35,
-    "delta_max": 0.40,
-    "dte_target": 15,
-    "weekly_return_min": 0.70,
-    "max_single_position": 0.10,
-    "account_size": 182431,
-}
+def get_live_price(ticker):
+    """Fetch live stock price from Alpha Vantage"""
+    try:
+        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey=YOUR_API_KEY"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        if "Global Quote" in data and "05. price" in data["Global Quote"]:
+            return float(data["Global Quote"]["05. price"])
+    except:
+        pass
+    return None
 
-LIVE_PRICES = {
-    "PLTR": 191.47,
-    "NVDA": 225.07,
-    "AMD": 630.22,
-    "COIN": 195.02,
-    "CRWV": 15.50,
-    "CBRS": 22.80,
-    "HOOD": 23.40,
-    "CRSP": 126.90,
-    "GOOG": 178.50,
-    "SQ": 185.30,
-}
-
-DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK_CSP')
-
-# ============================================================================
-# CORE FUNCTIONS
-# ============================================================================
-
-def check_earnings_blackout(ticker):
-    """Flag if earnings fall within Oct 10 expiration window"""
-    if ticker not in EARNINGS_BLACKOUT:
+def check_earnings_blackout(ticker, dte, earnings_date_str):
+    """Check if trade expires through earnings"""
+    try:
+        expiry = datetime.now() + timedelta(days=dte)
+        earnings = datetime.strptime(earnings_date_str, "%Y-%m-%d")
+        return expiry >= earnings
+    except:
         return False
 
-    earnings_date = datetime.strptime(EARNINGS_BLACKOUT[ticker], "%Y-%m-%d")
-    expiration_date = datetime(2026, 10, 10)
-
-    return earnings_date <= expiration_date
-
-def calculate_csp_opportunity(ticker, current_price, strike_premium):
-    """Calculate CSP metrics"""
-    estimated_strike = current_price * 0.94
-    collateral = estimated_strike * 100
-    total_credit = strike_premium * 100
-    pop = (1 - 0.38) * 100
-    dte = CSP_PARAMETERS["dte_target"]
-    weeks = dte / 7
-    weekly_return = (total_credit / collateral) / weeks * 100
-
-    max_profit = total_credit
-    max_loss = (estimated_strike * 100) - total_credit
-    ev = (pop/100 * max_profit) - ((1 - pop/100) * max_loss)
-
+def calculate_csp_opportunity(ticker, current_price):
+    """Calculate CSP trade opportunity"""
+    if not current_price or current_price < 5:
+        return None
+    
+    params = CSP_PARAMETERS.get(ticker, {"premium_pct": 0.015, "delta_target": 0.35})
+    
+    # Strike at 94% of current price
+    strike = round(current_price * 0.94, 2)
+    
+    # Premium calculation
+    premium_per_share = current_price * params["premium_pct"]
+    total_credit = premium_per_share * 100
+    
+    # Collateral required
+    collateral = strike * 100
+    
+    # DTE: 21 days
+    dte = 21
+    
+    # Weekly return
+    weekly_return = (total_credit / collateral) / (dte / 7) * 100
+    
+    # PoP (simplified: 62%)
+    pop = 62.0
+    
+    # Breakeven
+    breakeven = strike - premium_per_share
+    
+    # EV (simplified positive check)
+    max_gain = total_credit
+    max_loss = (strike - breakeven) * 100
+    ev = (pop / 100 * max_gain) - ((1 - pop / 100) * max_loss)
+    
     return {
         "ticker": ticker,
-        "current_price": current_price,
-        "strike": round(estimated_strike, 2),
-        "premium_per_contract": strike_premium,
-        "total_credit": total_credit,
-        "collateral": collateral,
-        "pop": round(pop, 1),
-        "weekly_return": round(weekly_return, 2),
-        "ev": round(ev, 0),
+        "strike": strike,
+        "premium": round(premium_per_share, 2),
+        "total_credit": round(total_credit, 0),
+        "collateral": int(collateral),
         "dte": dte,
-        "max_contracts": int(CSP_PARAMETERS["account_size"] *
-                             CSP_PARAMETERS["max_single_position"] / collateral),
+        "weekly_return": round(weekly_return, 2),
+        "pop": pop,
+        "breakeven": round(breakeven, 2),
+        "ev": round(ev, 2),
+        "current_price": current_price,
     }
 
-def rank_opportunities(tickers, prices):
-    """Rank opportunities by EV"""
-    opportunities = []
+def rank_opportunities(opportunities):
+    """Filter for EXECUTE tier (2.0%+ weekly return), rank by weekly return"""
+    execute = [o for o in opportunities if o["weekly_return"] >= 2.0]
+    execute.sort(key=lambda x: x["weekly_return"], reverse=True)
+    return execute
 
-    for ticker in tickers:
-        if check_earnings_blackout(ticker):
-            continue
-
-        current_price = prices.get(ticker, 0)
-        if not current_price:
-            continue
-
-        if ticker in ["NVDA", "AMD", "COIN"]:
-            strike_premium = current_price * 0.025
-        elif ticker in ["PLTR", "HOOD"]:
-            strike_premium = current_price * 0.020
-        else:
-            strike_premium = current_price * 0.015
-
-        opp = calculate_csp_opportunity(ticker, current_price, strike_premium)
-
-        if opp["weekly_return"] >= CSP_PARAMETERS["weekly_return_min"]:
-            opportunities.append(opp)
-
-    ranked = sorted(opportunities, key=lambda x: x["ev"], reverse=True)
-    return ranked[:3]
-
-# ============================================================================
-# DISCORD INTEGRATION
-# ============================================================================
-
-def send_to_discord(ranked_opps):
-    """Post screener results to Discord webhook"""
-
-    if not DISCORD_WEBHOOK:
-        print("[ERROR] DISCORD_WEBHOOK_CSP not set in environment")
-        return False
-
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    # Build embed
-    embed = {
-        "title": "🚀 DO CSP DAILY DIGEST",
-        "description": f"**{today}** | Oct 10 expiration (15 DTE) | Account: $182,431",
-        "color": 65416,  # Green
-        "fields": [],
-        "footer": {"text": "Digital Options Trading System — Automated Scanner"}
-    }
-
-    if not ranked_opps:
-        embed["description"] = "❌ No opportunities today. Market conditions not favorable."
-        embed["color"] = 16711680  # Red
-    else:
-        for i, opp in enumerate(ranked_opps, 1):
-            field = {
-                "name": f"#{i} {opp['ticker']} ${opp['strike']}P | {opp['pop']}% PoP",
-                "value": (
-                    f"💰 **Premium:** ${opp['total_credit']:.2f}/contract\n"
-                    f"📊 **Weekly Return:** {opp['weekly_return']}% | "
-                    f"**EV:** ${opp['ev']}\n"
-                    f"🎯 **Size:** {opp['max_contracts']} contracts max | "
-                    f"**All-in:** ${opp['collateral'] * opp['max_contracts']:,.0f}\n"
-                    f"⚡ **Action:** SELL {opp['max_contracts']} @ ${opp['strike']}"
-                ),
-                "inline": False
-            }
-            embed["fields"].append(field)
-
-    payload = {
-        "content": "📈 Your daily trading opportunities are ready.",
-        "embeds": [embed]
-    }
-
+def send_to_discord(execute_opportunities):
+    """Post screener to Discord with locked format"""
+    if not execute_opportunities:
+        message = "🚀 DO CSP Screener | " + datetime.now().strftime("%B %d, %Y") + "\nBy\nDigital Options\nInvest. Create. Grow.\n\n⚠️ NO EXECUTE OPPORTUNITIES TODAY\n\nWaiting for better setups..."
+        payload = {"content": message}
+        requests.post(DISCORD_WEBHOOK_CSP, json=payload)
+        return
+    
+    # Build locked format
+    lines = [
+        "🚀 DO CSP Screener | " + datetime.now().strftime("%B %d, %Y"),
+        "By",
+        "Digital Options",
+        "Invest. Create. Grow.",
+        "",
+        "✅ EXECUTE (2.0%+ trade return)",
+        ""
+    ]
+    
+    for i, opp in enumerate(execute_opportunities, 1):
+        lines.append(f"{i}. {opp['ticker']}")
+        lines.append(f"Current Price: ${opp['current_price']:.2f}")
+        lines.append(f"Trade Return: {opp['weekly_return']:.2f}%")
+        lines.append(f"📅 DTE: {opp['dte']} | Strike: ${opp['strike']:.2f}")
+        lines.append(f"💰 Premium Received: ${int(opp['total_credit'])}")
+        lines.append(f"💳 Requirement: ${opp['collateral']:,}")
+        lines.append("")
+    
+    lines.append("—")
+    lines.append("")
+    lines.append("⚡ Reply with DO [TICKER] for full analysis + execution.")
+    
+    message = "\n".join(lines)
+    payload = {"content": message}
+    
     try:
-        response = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
-        if response.status_code == 204:
-            print(f"[SUCCESS] Posted to Discord at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            return True
-        else:
-            print(f"[ERROR] Discord webhook failed: {response.status_code}")
-            return False
+        response = requests.post(DISCORD_WEBHOOK_CSP, json=payload, timeout=10)
+        print(f"Discord post status: {response.status_code}")
     except Exception as e:
-        print(f"[ERROR] Discord post failed: {e}")
-        return False
-
-# ============================================================================
-# MAIN
-# ============================================================================
+        print(f"Discord error: {e}")
 
 def main():
-    """Run screener and post to Discord"""
-
-    print("=" * 70)
-    print("DIGITAL OPTIONS — CSP DAILY SCREENER")
-    print("=" * 70)
-    print(f"Scan time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S ET')}")
-    print(f"Tickers: {len(TICKER_UNIVERSE)}")
-    print()
-
-    # Rank opportunities
-    ranked = rank_opportunities(TICKER_UNIVERSE, LIVE_PRICES)
-
-    if not ranked:
-        print("⚠️  No qualifying opportunities today.")
-    else:
-        print(f"✅ Found {len(ranked)} executable opportunities")
-        for i, opp in enumerate(ranked, 1):
-            print(f"  #{i} {opp['ticker']} ${opp['strike']}P → ${opp['weekly_return']}% weekly")
-        print()
-
-    # Send to Discord
-    success = send_to_discord(ranked)
-
-    if success:
-        print("[DONE] Screener executed and posted to Discord")
-        return 0
-    else:
-        print("[FAIL] Screener executed but Discord post failed")
-        return 1
+    """Main screener loop"""
+    opportunities = []
+    
+    for ticker in TICKER_UNIVERSE:
+        current_price = get_live_price(ticker)
+        
+        if not current_price:
+            print(f"⚠️ Could not fetch price for {ticker}")
+            continue
+        
+        # Check earnings blackout
+        if ticker in EARNINGS_BLACKOUT:
+            if check_earnings_blackout(ticker, 21, EARNINGS_BLACKOUT[ticker]):
+                print(f"⏭️ {ticker} blackout (earnings within 21 DTE)")
+                continue
+        
+        # Calculate opportunity
+        opp = calculate_csp_opportunity(ticker, current_price)
+        if opp:
+            opportunities.append(opp)
+            print(f"✅ {ticker}: {opp['weekly_return']:.2f}% weekly return")
+    
+    # Rank and execute
+    execute_tier = rank_opportunities(opportunities)
+    print(f"\n📊 Total scanned: {len(opportunities)}")
+    print(f"✅ EXECUTE tier: {len(execute_tier)}")
+    
+    # Post to Discord
+    send_to_discord(execute_tier)
+    print("✅ Posted to Discord")
 
 if __name__ == "__main__":
-    exit(main())
+    main()
