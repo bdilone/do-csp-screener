@@ -2,7 +2,7 @@ name: DO CSP Daily Screener
 
 on:
   schedule:
-    - cron: '0 12 * * 1-5'
+    - cron: '0 12 * * 1-5'  # 8 AM ET weekdays
   workflow_dispatch:
 
 jobs:
