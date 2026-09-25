@@ -1,11 +1,12 @@
 import requests
 import json
+import os
 from datetime import datetime, timedelta
-from urllib.parse import urlencode
 
 # CONFIG
 TICKER_UNIVERSE = ["PLTR", "NVDA", "AMD", "COIN", "CRWV", "CBRS", "HOOD", "CRSP", "GOOG", "SQ"]
-DISCORD_WEBHOOK_CSP = "YOUR_WEBHOOK_URL"  # Set via GitHub secret
+DISCORD_WEBHOOK_CSP = os.getenv("DISCORD_WEBHOOK_CSP")
+
 CSP_PARAMETERS = {
     "NVDA": {"premium_pct": 0.025, "delta_target": 0.35},
     "AMD": {"premium_pct": 0.025, "delta_target": 0.35},
@@ -30,13 +31,16 @@ EARNINGS_BLACKOUT = {
 def get_live_price(ticker):
     """Fetch live stock price from Alpha Vantage"""
     try:
-        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey=YOUR_API_KEY"
+        api_key = os.getenv("ALPHA_VANTAGE_KEY", "demo")
+        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={api_key}"
         response = requests.get(url, timeout=5)
         data = response.json()
         if "Global Quote" in data and "05. price" in data["Global Quote"]:
-            return float(data["Global Quote"]["05. price"])
-    except:
-        pass
+            price_str = data["Global Quote"]["05. price"]
+            if price_str:
+                return float(price_str)
+    except Exception as e:
+        print(f"⚠️ Price fetch error for {ticker}: {e}")
     return None
 
 def check_earnings_blackout(ticker, dte, earnings_date_str):
@@ -104,10 +108,17 @@ def rank_opportunities(opportunities):
 
 def send_to_discord(execute_opportunities):
     """Post screener to Discord with locked format"""
+    if not DISCORD_WEBHOOK_CSP:
+        print("⚠️ DISCORD_WEBHOOK_CSP not set")
+        return
+    
     if not execute_opportunities:
         message = "🚀 DO CSP Screener | " + datetime.now().strftime("%B %d, %Y") + "\nBy\nDigital Options\nInvest. Create. Grow.\n\n⚠️ NO EXECUTE OPPORTUNITIES TODAY\n\nWaiting for better setups..."
         payload = {"content": message}
-        requests.post(DISCORD_WEBHOOK_CSP, json=payload)
+        try:
+            requests.post(DISCORD_WEBHOOK_CSP, json=payload, timeout=10)
+        except Exception as e:
+            print(f"Discord error: {e}")
         return
     
     # Build locked format
@@ -139,12 +150,14 @@ def send_to_discord(execute_opportunities):
     
     try:
         response = requests.post(DISCORD_WEBHOOK_CSP, json=payload, timeout=10)
-        print(f"Discord post status: {response.status_code}")
+        print(f"✅ Discord post status: {response.status_code}")
     except Exception as e:
-        print(f"Discord error: {e}")
+        print(f"❌ Discord error: {e}")
 
 def main():
     """Main screener loop"""
+    print("🚀 Starting CSP Screener...\n")
+    
     opportunities = []
     
     for ticker in TICKER_UNIVERSE:
@@ -169,11 +182,11 @@ def main():
     # Rank and execute
     execute_tier = rank_opportunities(opportunities)
     print(f"\n📊 Total scanned: {len(opportunities)}")
-    print(f"✅ EXECUTE tier: {len(execute_tier)}")
+    print(f"✅ EXECUTE tier: {len(execute_tier)}\n")
     
     # Post to Discord
     send_to_discord(execute_tier)
-    print("✅ Posted to Discord")
+    print("✅ Screener complete")
 
 if __name__ == "__main__":
     main()
